@@ -98,7 +98,8 @@ class RedGymEnv(Env):
             event_names = json.load(f)
         self.event_names = event_names
 
-        self.screen_output_shape = (144, 160, self.frame_stacks)
+        self.screen_output_shape = (77, 80, self.frame_stacks)
+        # self.screen_output_shape = (144, 160, self.frame_stacks)
         self.coords_pad = 12
 
         # Set these in ALL subclasses
@@ -240,7 +241,7 @@ class RedGymEnv(Env):
             self.explore_map[self.explore_map > 0], 0.15, 1
         )
 
-    def render(self, reduce_res=False):
+    def render(self, reduce_res=True):
         # (144, 160, 3)
         game_pixels_render = self.screen.screen_ndarray()[:, :, 0:1]
         # place an overlay on top of the screen greying out places we haven't visited
