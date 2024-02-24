@@ -54,8 +54,7 @@ def load_from_config(yaml_path, env):
 
 
 def make_policy(env, env_module, args):
-    # policy = env_module.Policy(env, **args.policy)
-    policy = env_module.MultiConvolutionPolicy(env, **args.policy)
+    policy = env_module.Policy(env, **args.policy)
     if args.force_recurrence or env_module.Recurrent is not None:
         policy = env_module.Recurrent(env, policy, **args.recurrent)
         policy = pufferlib.frameworks.cleanrl.RecurrentPolicy(policy)
@@ -172,7 +171,7 @@ if __name__ == "__main__":
         choices=["serial", "multiprocessing"],
         help="Vectorization method (serial, multiprocessing)",
     )
-    parser.add_argument("--wandb-entity", type=str, default="thatguy11325", help="WandB entity")
+    parser.add_argument("--wandb-entity", type=str, default="xinpw8", help="WandB entity")
     parser.add_argument("--wandb-project", type=str, default="pokemonred", help="WandB project")
     parser.add_argument("--wandb-group", type=str, default="pokemonred", help="WandB group")
     parser.add_argument("--track", action="store_true", help="Track on WandB")
@@ -187,6 +186,11 @@ if __name__ == "__main__":
     parser.add_argument("--save-video", action="store_true")
     parser.add_argument("--fast-video", action="store_true")
     parser.add_argument("--frame-stacks", type=int, default=1)
+    parser.add_argument(
+        "--policy",
+        choices=["MultiInputPolicy", "CnnPolicy", "CnnLstmPolicy", "MlpLstmPolicy"],
+        default="CnnLstmPolicy",
+    )
     parser.add_argument("--sess-id", type=str, default=str(uuid.uuid4())[:8])
     parser.add_argument("--perfect-ivs", action="store_true", default=False, help="Enable perfect IVs")
     parser.add_argument("--stream-wrapper", action="store_true", default=False, help="Enable stream wrapper")
@@ -217,6 +221,7 @@ if __name__ == "__main__":
         "explore_weight": 3,  # 2.5
         "explore_npc_weight": 1,  # 2.5
         "frame_stacks": parsed_args.frame_stacks,
+        "policy": parsed_args.policy,
         "step_forgetting_factor": {
             "npc": 0.995,
             "hidden_objs": 0.95,

@@ -7,21 +7,15 @@ class MultiConvolutionPolicy(pufferlib.models.Policy):
     def __init__(
         self,
         env,
-        screen_framestack: int = 1,
-        mask_framestack: int = 1,
-        global_map_frame_stack: int = 1,
-        screen_flat_size: int = 14336,
-        mask_flat_size: int = 128,
-        global_map_flat_size: int = 169728,
-        input_size: int = 512,
-        framestack: int = 1,
-        flat_size: int = 1,
-        screen_hidden_size=512,
-        mask_hidden_size=128,
-        global_map_hidden_size=512,
-        hidden_size=768,
+        screen_framestack: int,
+        mask_framestack: int,
+        global_map_frame_stack: int,
+        screen_flat_size: int,
+        mask_flat_size: int,
+        global_map_flat_size: int,
+        hidden_size=512,
         output_size=512,
-        channels_last: bool = True,
+        channels_last: bool = False,
         downsample: int = 1,
     ):
         super().__init__(env)
@@ -36,17 +30,19 @@ class MultiConvolutionPolicy(pufferlib.models.Policy):
             pufferlib.pytorch.layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            pufferlib.pytorch.layer_init(nn.Linear(screen_flat_size, screen_hidden_size)),
+            pufferlib.pytorch.layer_init(nn.Linear(screen_flat_size, hidden_size)),
             nn.ReLU(),
         )
 
         self.masks_network = nn.Sequential(
-            pufferlib.pytorch.layer_init(nn.Conv2d(mask_framestack, 64, 4, stride=2)),
+            pufferlib.pytorch.layer_init(nn.Conv2d(mask_framestack, 32, 8, stride=4)),
+            nn.ReLU(),
+            pufferlib.pytorch.layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
             pufferlib.pytorch.layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            pufferlib.pytorch.layer_init(nn.Linear(mask_flat_size, 128)),
+            pufferlib.pytorch.layer_init(nn.Linear(mask_flat_size, hidden_size)),
             nn.ReLU(),
         )
 
@@ -58,16 +54,8 @@ class MultiConvolutionPolicy(pufferlib.models.Policy):
             pufferlib.pytorch.layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            pufferlib.pytorch.layer_init(nn.Linear(global_map_flat_size, global_map_hidden_size)),
+            pufferlib.pytorch.layer_init(nn.Linear(global_map_flat_size, hidden_size)),
             nn.ReLU(),
-        )
-
-        self.encode_linear = pufferlib.pytorch.layer_init(
-            nn.Linear(
-                screen_hidden_size + mask_hidden_size + global_map_hidden_size,
-                hidden_size,
-            ),
-            std=0.01,
         )
 
         self.actor = pufferlib.pytorch.layer_init(
@@ -76,21 +64,19 @@ class MultiConvolutionPolicy(pufferlib.models.Policy):
         self.value_fn = pufferlib.pytorch.layer_init(nn.Linear(output_size, 1), std=1)
 
     def encode_observations(self, observations):
-        observations = pufferlib.emulation.unpack_batched_obs(observations, self.unflatten_context)
-
         output = []
         for okey, network, scalefactor in zip(
             ("screen", "masks", "global_map"),
             (self.screen_network, self.masks_network, self.global_map_network),
-            (255.0, 1.0, 1.0),
+            (255.0, 255.0, 255.0),
         ):
             observation = observations[okey]
             if self.channels_last:
-                observation = observation.permute(0, 3, 1, 2)
+                observations = observation.permute(0, 3, 1, 2)
             if self.downsample > 1:
                 observation = observation[:, :, :: self.downsample, :: self.downsample]
             output.append(network(observation.float() / scalefactor))
-        return self.encode_linear(torch.cat(output, dim=-1)), None
+        return torch.cat(output), None
 
     def decode_actions(self, flat_hidden, lookup, concat=None):
         action = self.actor(flat_hidden)
@@ -105,7 +91,7 @@ class Recurrent(pufferlib.models.RecurrentWrapper):
 
 class Policy(pufferlib.models.Convolutional):
     def __init__(
-        self, env, input_size=512, hidden_size=512, output_size=512, framestack=3, flat_size=14336
+        self, env, input_size=512, hidden_size=512, output_size=512, framestack=3, flat_size=1920 # 14336 for self.output_shape = (144, 160, self.frame_stacks * 3)
     ):
         super().__init__(
             env=env,

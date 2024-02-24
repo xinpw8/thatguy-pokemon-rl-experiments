@@ -1,0 +1,2 @@
+defaultdict(<class 'str'>, {'Oaks Lab': '0.14', 'Viridian City': '18.20', 'Viridian Forest': '37.00'})
+defaultdict(<function read_checkpoint_logs.<locals>.<lambda> at 0x7f45ab601260>, {'Oaks Lab': {'mean': '50.40', 'variance': '2094.58', 'std_dev': '45.77', 'environments_percents': 100}, 'Viridian City': {'mean': '35.22', 'variance': '118.00', 'std_dev': '10.86', 'environments_percents': 100.0}, 'Viridian Forest': {'mean': '66.24', 'variance': '1016.93', 'std_dev': '31.89', 'environments_percents': 56.25}})

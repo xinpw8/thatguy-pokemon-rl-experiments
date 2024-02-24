@@ -164,3 +164,4 @@ cython_debug/
 # local session files
 session_*
 experiments
+thatguy/pokemonred_puffer/wandb

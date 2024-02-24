@@ -29,8 +29,6 @@ CUT_SEQ = [
 CUT_GRASS_SEQ = deque([(0x52, 255, 1, 0, 1, 1), (0x52, 255, 1, 0, 1, 1), (0x52, 1, 1, 0, 1, 1)])
 CUT_FAIL_SEQ = deque([(-1, 255, 0, 0, 4, 1), (-1, 255, 0, 0, 1, 1), (-1, 255, 0, 0, 1, 1)])
 
-VISITED_MASK_SHAPE = (144 // 16, 160 // 16, 1)
-
 
 # TODO: Make global map usage a configuration parameter
 class RedGymEnv(Env):
@@ -45,6 +43,7 @@ class RedGymEnv(Env):
         self.save_video = config["save_video"]
         self.fast_video = config["fast_video"]
         self.frame_stacks = config["frame_stacks"]
+        self.policy = config["policy"]
         self.explore_weight = 1 if "explore_weight" not in config else config["explore_weight"]
         self.explore_npc_weight = (
             1 if "explore_npc_weight" not in config else config["explore_npc_weight"]
@@ -52,6 +51,7 @@ class RedGymEnv(Env):
         self.explore_hidden_obj_weight = (
             1 if "explore_hidden_obj_weight" not in config else config["explore_hidden_obj_weight"]
         )
+        self.policy = config["policy"]
         self.instance_id = (
             str(uuid.uuid4())[:8] if "instance_id" not in config else config["instance_id"]
         )
@@ -98,8 +98,10 @@ class RedGymEnv(Env):
             event_names = json.load(f)
         self.event_names = event_names
 
-        self.screen_output_shape = (77, 80, self.frame_stacks)
+        self.output_shape = (72, 80, self.frame_stacks * 3)
+        # self.output_shape = (77, 80, self.frame_stacks)
         # self.screen_output_shape = (144, 160, self.frame_stacks)
+        # self.output_shape = (144, 160, self.frame_stacks * 3)
         self.coords_pad = 12
 
         # Set these in ALL subclasses
@@ -107,17 +109,32 @@ class RedGymEnv(Env):
 
         self.enc_freqs = 8
 
-        self.observation_space = spaces.Dict(
-            {
-                "screen": spaces.Box(
-                    low=0, high=255, shape=self.screen_output_shape, dtype=np.uint8
-                ),
-                "masks": spaces.Box(
-                    low=0, high=1, shape=VISITED_MASK_SHAPE, dtype=np.float32
-                ),
-                "global_map": spaces.Box(low=0, high=1, shape=(*GLOBAL_MAP_SHAPE, 1), dtype=np.float32),
-            }
-        )
+        if self.policy == "MultiInputPolicy":
+            self.observation_space = spaces.Dict(
+                {
+                    "screens": spaces.Box(low=0, high=255, shape=self.output_shape, dtype=np.uint8),
+                    "health": spaces.Box(low=0, high=1),
+                    "level": spaces.Box(low=-1, high=1, shape=(self.enc_freqs,)),
+                    "badges": spaces.MultiBinary(8),
+                    # "events": spaces.MultiBinary((EVENT_FLAGS_END - EVENT_FLAGS_START) * 8),
+                    "map": spaces.Box(
+                        low=0,
+                        high=255,
+                        shape=(self.coords_pad * 4, self.coords_pad * 4, 1),
+                        dtype=np.uint8,
+                    ),
+                    "recent_actions": spaces.MultiDiscrete(
+                        [len(self.valid_actions)] * self.frame_stacks
+                    ),
+                    "seen_pokemon": spaces.MultiBinary(152),
+                    "caught_pokemon": spaces.MultiBinary(152),
+                    "moves_obtained": spaces.MultiBinary(0xA5),
+                }
+            )
+        elif self.policy in ["CnnPolicy", "MlpLstmPolicy", "CnnLstmPolicy"]:
+            self.observation_space = spaces.Box(
+                low=0, high=255, shape=self.output_shape, dtype=np.uint8
+            )
 
         head = "headless" if config["headless"] else "SDL2"
 
@@ -263,7 +280,7 @@ class RedGymEnv(Env):
         # 68 -> player y, 72 -> player x
         # guess we want to attempt to map the pixels to player units or vice versa
         # Experimentally determined magic numbers below. Beware
-        visited_mask = np.zeros(VISITED_MASK_SHAPE, dtype=np.float32)
+        visited_mask = np.zeros_like(game_pixels_render)
         """
         if self.taught_cut:
             cut_mask = np.zeros_like(game_pixels_render)
@@ -278,16 +295,6 @@ class RedGymEnv(Env):
                     # map [(0,0),(1,1)] -> [(0,.5),(1,1)] (cause we dont wnat it to be fully black)
                     # y = 1/2 x + .5
                     # current location tiles - player_y*8, player_x*8
-                    visited_mask[y, x, 0] = self.seen_coords.get(
-                        (
-                            player_x + x + 1,
-                            player_y + y + 1,
-                            map_n,
-                        ),
-                        0.15,
-                    )
-
-                    """
                     visited_mask[
                         16 * y + 76 : 16 * y + 16 + 76,
                         16 * x + 80 : 16 * x + 16 + 80,
@@ -305,7 +312,6 @@ class RedGymEnv(Env):
                             )
                         )
                     )
-                    """
                     """
                     if self.taught_cut:
                         cut_mask[
@@ -338,21 +344,17 @@ class RedGymEnv(Env):
         """
 
         # game_pixels_render = np.concatenate([game_pixels_render, visited_mask, cut_mask], axis=-1)
-        # game_pixels_render = np.concatenate([game_pixels_render, visited_mask], axis=-1)
+        game_pixels_render = np.concatenate([game_pixels_render, visited_mask], axis=-1)
 
         if reduce_res:
             # game_pixels_render = (
             #     downscale_local_mean(game_pixels_render, (2, 2, 1))
             # ).astype(np.uint8)
             game_pixels_render = game_pixels_render[::2, ::2, :]
-        return {
-            "screen": game_pixels_render,
-            "masks": visited_mask,
-        }
+        return game_pixels_render
 
     def _get_obs(self):
         screen = self.render()
-        """
         screen = np.concatenate(
             [
                 screen,
@@ -363,11 +365,30 @@ class RedGymEnv(Env):
             ],
             axis=-1,
         )
-        """
 
         self.update_recent_screens(screen)
 
-        return {**screen, "global_map": np.expand_dims(self.explore_map, axis=-1)}
+        if self.policy == "MultiInputPolicy":
+            # normalize to approx 0-1
+            level_sum = 0.02 * sum(
+                [self.read_m(a) for a in [0xD18C, 0xD1B8, 0xD1E4, 0xD210, 0xD23C, 0xD268]]
+            )
+
+            return {
+                "screens": np.array(self.recent_screens).reshape(self.output_shape),
+                "health": np.array([self.read_hp_fraction()]),
+                "level": self.fourier_encode(level_sum),
+                "badges": np.array(
+                    [int(bit) for bit in f"{self.read_m(0xD356):08b}"], dtype=np.int8
+                ),
+                "events": np.array(self.read_event_bits(), dtype=np.int8),
+                "recent_actions": np.array(self.recent_actions),
+                "caught_pokemon": self.caught_pokemon,
+                "seen_pokemon": self.seen_pokemon,
+                "moves_obtained": self.moves_obtained,
+            }
+        else:
+            return np.array(self.recent_screens).reshape(self.output_shape)
 
     def set_perfect_iv_dvs(self):
         party_size = self.read_m(PARTY_SIZE)
@@ -491,15 +512,15 @@ class RedGymEnv(Env):
         # 0xCFCB - wUpdateSpritesEnabled
         if self.taught_cut:
             player_direction = self.pyboy.get_memory_value(0xC109)
-            x, y, map_id = self.get_game_coords()  # x, y, map_id
-            if player_direction == 0:  # down
-                coords = (x, y + 1, map_id)
+            x, y, map_id = self.get_game_coords() # x, y, map_id
+            if player_direction == 0: # down
+                coords = (x, y+1, map_id)
             if player_direction == 4:
-                coords = (x, y - 1, map_id)
+                coords = (x, y-1, map_id)
             if player_direction == 8:
-                coords = (x - 1, y, map_id)
+                coords = (x-1, y, map_id)
             if player_direction == 0xC:
-                coords = (x + 1, y, map_id)
+                coords = (x+1, y, map_id)
             self.cut_state.append(
                 (
                     self.pyboy.get_memory_value(0xCFC6),
@@ -630,7 +651,7 @@ class RedGymEnv(Env):
         )
         self.full_frame_writer.__enter__()
         self.model_frame_writer = media.VideoWriter(
-            base_dir / model_name, self.screen_output_shape[:2], fps=60, input_format="gray"
+            base_dir / model_name, self.output_shape[:2], fps=60, input_format="gray"
         )
         self.model_frame_writer.__enter__()
         map_name = Path(f"map_reset_{self.reset_count}_id{self.instance_id}").with_suffix(".mp4")
@@ -643,7 +664,7 @@ class RedGymEnv(Env):
         self.map_frame_writer.__enter__()
 
     def add_video_frame(self):
-        self.full_frame_writer.add_image(self.render(reduce_res=False)[:, :, 0])
+        self.full_frame_writer.add_image(self.render(reduce_res=True)[:, :, 0])
         self.model_frame_writer.add_image(self.render(reduce_res=True)[:, :, 0])
 
     def get_game_coords(self):

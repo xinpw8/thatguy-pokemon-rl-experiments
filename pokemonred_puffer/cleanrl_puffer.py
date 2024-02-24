@@ -212,7 +212,7 @@ class CleanPuffeRL:
                 envs_per_worker=config.envs_per_worker,
                 envs_per_batch=config.envs_per_batch,
                 env_pool=config.env_pool,
-                # mask_agents=True,
+                mask_agents=True,
             )
 
         obs_shape = self.pool.single_observation_space.shape
@@ -245,8 +245,8 @@ class CleanPuffeRL:
         self.optimizer = optim.Adam(self.agent.parameters(), lr=config.learning_rate, eps=1e-5)
         self.opt_state = resume_state.get("optimizer_state_dict", None)
 
-        if config.compile:
-            self.agent = torch.compile(self.agent, mode=config.compile_mode)
+        # if config.compile:
+        #     self.agent = torch.compile(self.agent, mode=config.compile_mode)
             # TODO: Figure out how to compile the optimizer!
             # self.calculate_loss = torch.compile(self.calculate_loss, mode=config.compile_mode)
 

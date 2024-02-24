@@ -1,0 +1,2 @@
+defaultdict(<class 'str'>, {'Oaks Lab': '1.22'})
+defaultdict(<function read_checkpoint_logs.<locals>.<lambda> at 0x7fbd68112ac0>, {'Oaks Lab': {'mean': '1.43', 'variance': '0.06', 'std_dev': '0.24', 'environments_percents': 100.0}})
