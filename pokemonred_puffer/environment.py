@@ -14,6 +14,9 @@ from pyboy import PyBoy
 from pyboy.utils import WindowEvent
 
 from pokemonred_puffer.global_map import GLOBAL_MAP_SHAPE, local_to_global
+import cv2
+from functools import partial
+from collections import defaultdict, deque
 
 EVENT_FLAGS_START = 0xD747
 EVENTS_FLAGS_LENGTH = 320
@@ -26,10 +29,27 @@ CUT_SEQ = [
     ((0x50, 1, 1, 0, 4, 1), (0x50, 1, 1, 0, 1, 1)),
 ]
 
+X_POS_ADDR = 0xD362
+Y_POS_ADDR = 0xD361
+MAP_N_ADDR = 0xD35E
 CUT_GRASS_SEQ = deque([(0x52, 255, 1, 0, 1, 1), (0x52, 255, 1, 0, 1, 1), (0x52, 1, 1, 0, 1, 1)])
 CUT_FAIL_SEQ = deque([(-1, 255, 0, 0, 4, 1), (-1, 255, 0, 0, 1, 1), (-1, 255, 0, 0, 1, 1)])
+bg = cv2.imread('/puffertank/tg_networks/pokemonred_puffer/pokemonred_puffer/k_map_1_16th_scale.png')
 
-VISITED_MASK_SHAPE = (144 // 16, 160 // 16, 1)
+MAP_PATH = '/puffertank/tg_networks/pokemonred_puffer/pokemonred_puffer/map_data.json' # __file__.rstrip('game_map.py') + 'map_data.json'
+MAP_DATA = json.load(open(MAP_PATH, 'r'))['regions']
+MAP_DATA = {int(e['id']): e for e in MAP_DATA}
+
+# Handle KeyErrors
+def local_to_global(r, c, map_n):
+    try:
+        map_x, map_y,= MAP_DATA[map_n]['coordinates']
+        return r + map_y, c + map_x
+    except KeyError:
+        print(f'Map id {map_n} not found in map_data.json.')
+        return r + 0, c + 0
+
+# VISITED_MASK_SHAPE = (144 // 16, 160 // 16, 1)
 
 
 # TODO: Make global map usage a configuration parameter
@@ -64,6 +84,7 @@ class RedGymEnv(Env):
         self.map_frame_writer = None
         self.reset_count = 0
         self.all_runs = []
+        self.counts_map = np.zeros((444, 436), dtype=np.uint8)
 
         self.essential_map_locations = {
             v: i for i, v in enumerate([40, 0, 12, 1, 13, 51, 2, 54, 14, 59, 60, 61, 15, 3, 65])
@@ -98,25 +119,35 @@ class RedGymEnv(Env):
             event_names = json.load(f)
         self.event_names = event_names
 
-        self.screen_output_shape = (144, 160, self.frame_stacks)
+        # self.screen_output_shape = (144, 160, self.frame_stacks)
         self.coords_pad = 12
+
+        self.counts_map_overlay_obs = np.zeros((444, 436))
+        self.counts_map_overlay_output_shape = self.counts_map_overlay_obs.shape
+        self.screen_window_combined = np.zeros((144, 160, 4))
+        self.screen_output_shape = self.screen_window_combined.shape
 
         # Set these in ALL subclasses
         self.action_space = spaces.Discrete(len(self.valid_actions))
 
         self.enc_freqs = 8
+        
+        self.observation_space = spaces.Dict({
+    "screen": spaces.Box(low=0, high=255, shape=(144, 160, 3), dtype=np.uint8),
+    "global_map": spaces.Box(low=0, high=255, shape=(444, 436, 3), dtype=np.uint8),
+})
 
-        self.observation_space = spaces.Dict(
-            {
-                "screen": spaces.Box(
-                    low=0, high=255, shape=self.screen_output_shape, dtype=np.uint8
-                ),
-                "masks": spaces.Box(
-                    low=0, high=1, shape=VISITED_MASK_SHAPE, dtype=np.float32
-                ),
-                "global_map": spaces.Box(low=0, high=1, shape=(*GLOBAL_MAP_SHAPE, 1), dtype=np.float32),
-            }
-        )
+        # self.observation_space = spaces.Dict(
+        #     {
+        #         "screen": spaces.Box(
+        #             low=0, high=255, shape=self.screen_output_shape, dtype=np.uint8
+        #         ),
+        #         # "masks": spaces.Box(
+        #         #     low=0, high=1, shape=VISITED_MASK_SHAPE, dtype=np.float32
+        #         # ),
+        #         "global_map": spaces.Box(low=0, high=1, shape=(*GLOBAL_MAP_SHAPE, 1), dtype=np.float32),
+        #     }
+        # )
 
         head = "headless" if config["headless"] else "SDL2"
 
@@ -128,11 +159,121 @@ class RedGymEnv(Env):
         )
 
         self.screen = self.pyboy.botsupport_manager().screen()
+        R, C = self.screen.raw_screen_buffer_dims()
+        self.obs_size = (R, C) 
+        self.screen_memory = defaultdict(
+        lambda: np.zeros((255, 255, 1), dtype=np.uint8))
+        self.obs_size += (4,)
 
         if not config["headless"]:
             self.pyboy.set_emulation_speed(6)
-
+        
         self.first = True
+        
+    def position(self):
+        r_pos = self.pyboy.get_memory_value(Y_POS_ADDR)
+        c_pos = self.pyboy.get_memory_value(X_POS_ADDR)
+        map_n = self.pyboy.get_memory_value(MAP_N_ADDR)
+        if r_pos >= 443:
+            r_pos = 444
+        if r_pos <= 0:
+            r_pos = 0
+        if c_pos >= 443:
+            c_pos = 444
+        if c_pos <= 0:
+            c_pos = 0
+        if map_n > 247:
+            map_n = 247
+        if map_n < -1:
+            map_n = -1
+        return r_pos, c_pos, map_n
+
+    def make_pokemon_red_overlay_fast(self, bg, counts):
+        # Normalize counts to the range [0, 255] for grayscale
+        if counts.max() > 0:
+            counts_normalized = np.clip((counts / counts.max()) * 255, 0, 255).astype(np.uint8)
+        else:
+            counts_normalized = np.zeros_like(counts, dtype=np.uint8)
+
+        # Expand the overlay to have three channels
+        counts_resized_expanded = np.repeat(counts_normalized[:, :, np.newaxis], 3, axis=2)
+
+        # Apply the overlay with adjusted alpha
+        alpha = 0.8  # Adjust alpha to control the visibility of the overlay
+        overlay = ((1 - alpha) * bg.astype(float) + alpha * counts_resized_expanded.astype(float)).astype(np.uint8)
+
+        return overlay
+
+
+    # def make_pokemon_red_overlay_fast(self, bg, counts):
+    #     if counts.max() > 0:
+    #         # Normalize counts to the range [0, 255] for grayscale
+    #         counts_normalized = np.clip((counts / counts.max()) * 255, 0, 255).astype(np.uint8)
+    #     else:
+    #         # Handle the case where counts.max() <= 0, e.g., by setting to zero
+    #         counts_normalized = np.zeros_like(counts, dtype=np.uint8)
+    #     # Resize counts map to the size of the background
+    #     counts_resized = cv2.resize(counts_normalized, (bg.shape[1], bg.shape[0]), interpolation=cv2.INTER_NEAREST)
+    #     # Create a mask where counts are non-zero
+    #     mask = counts_resized > 0
+    #     # Prepare the overlay by combining background and scaled counts map
+    #     # Adjust the alpha value to control the visibility of the overlay
+    #     alpha = 0.8
+    #     overlay = np.where(mask, ((1-alpha) * bg + alpha * counts_resized), bg).astype(np.uint8)
+    #     return overlay
+    
+    def map_updater(self):
+        # bg = cv2.imread('kanto_map_dsv.png', cv2.IMREAD_GRAYSCALE)  # Load in grayscale
+        return partial(self.make_pokemon_red_overlay_fast, bg)
+    
+    def get_fixed_window_2(self, arr, y, x, window_size):
+        height, width, _ = arr.shape
+        h_w, w_w = window_size[0], window_size[1]
+        h_w, w_w = window_size[0] // 2, window_size[1] // 2
+        y_min = max(0, y - h_w)
+        y_max = min(height, y + h_w + (window_size[0] % 2))
+        x_min = max(0, x - w_w)
+        x_max = min(width, x + w_w + (window_size[1] % 2))
+        window = arr[y_min:y_max, x_min:x_max]
+        pad_top = h_w - (y - y_min)
+        pad_bottom = h_w + (window_size[0] % 2) - 1 - (y_max - y - 1)
+        pad_left = w_w - (x - x_min)
+        pad_right = w_w + (window_size[1] % 2) - 1 - (x_max - x - 1)
+        return np.pad(
+            window,
+            ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)),
+            mode="constant",
+        )
+
+
+    def update_heat_map(self, r, c, current_map):
+        '''
+        Updates the heat map based on the agent's current position.
+        Args:
+            r (int): global y coordinate of the agent's position.
+            c (int): global x coordinate of the agent's position.
+            current_map (int): ID of the current map (map_n)
+        Updates the counts_map to track the frequency of visits to each position on the map.
+        '''
+        # Convert local position to global position
+        try:
+            glob_r, glob_c = local_to_global(r, c, current_map)
+        except IndexError:
+            print(f'IndexError: index {glob_r} or {glob_c} for {current_map} is out of bounds for axis 0 with size 444.')
+            glob_r = 0
+            glob_c = 0
+        # Update heat map based on current map
+        if self.last_map == current_map or self.last_map == -1:
+            # Increment count for current global position
+                try:
+                    self.counts_map[glob_r, glob_c] += 1
+                except:
+                    pass
+        else:
+            # Reset count for current global position if it's a new map for warp artifacts
+            self.counts_map[(glob_r, glob_c)] = -1
+        # Update last_map for the next iteration
+        self.last_map = current_map
 
     def reset(self, seed: Optional[int] = None):
         # restart game, skipping credits
@@ -191,10 +332,6 @@ class RedGymEnv(Env):
         self.current_event_flags_set = {}
 
         self.action_hist = np.zeros(len(self.valid_actions))
-
-        # experiment!
-        # self.max_steps += 128
-
         self.max_map_progress = 0
         self.progress_reward = self.get_game_state_reward()
         self.total_reward = sum([val for _, val in self.progress_reward.items()])
@@ -204,8 +341,6 @@ class RedGymEnv(Env):
         return self._get_obs(), {}
 
     def init_map_mem(self):
-        # Maybe I should preallocate a giant matrix for all map ids
-        # All map ids have the same size, right?
         self.seen_coords = {}
         # self.seen_global_coords = np.zeros(GLOBAL_MAP_SHAPE)
         self.seen_map_ids = np.zeros(256)
@@ -231,10 +366,6 @@ class RedGymEnv(Env):
             (k, max(0.15, v * self.step_forgetting_factor["npc"]))
             for k, v in self.seen_npcs.items()
         )
-        # self.seen_hidden_objs.update(
-        #     (k, max(0.15, v * self.step_forgetting_factor["hidden_objs"]))
-        #     for k, v in self.seen_hidden_objs.items()
-        # )
         self.explore_map *= self.step_forgetting_factor["explore"]
         self.explore_map[self.explore_map > 0] = np.clip(
             self.explore_map[self.explore_map > 0], 0.15, 1
@@ -243,130 +374,95 @@ class RedGymEnv(Env):
     def render(self, reduce_res=False):
         # (144, 160, 3)
         game_pixels_render = self.screen.screen_ndarray()[:, :, 0:1]
-        # place an overlay on top of the screen greying out places we haven't visited
-        # first get our location
-        player_x, player_y, map_n = self.get_game_coords()
+        # # place an overlay on top of the screen greying out places we haven't visited
+        # # first get our location
+        # player_x, player_y, map_n = self.get_game_coords()
+        # # game_pixels_render = np.concatenate([game_pixels_render, visited_mask, cut_mask], axis=-1)
+        # # game_pixels_render = np.concatenate([game_pixels_render, visited_mask], axis=-1)
 
-        """
-        map_height = self.read_m(0xD524)
-        map_width = self.read_m(0xD525)
-        print(
-            self.read_m(0xC6EF),
-            self.read_m(0xD524),
-            self.read_m(0xD525),
-            player_y,
-            player_x,
-        """
+        r, c, map_n = self.get_game_coords()
+        mmap = self.screen_memory[map_n]
+        if 0 <= r <= 254 and 0 <= c <= 254:
+            mmap[r, c] = 255
+        # screen_data_2 = (self.screen.screen_ndarray()[:, :]).astype(np.uint8) # astype(np.uint8)
+        screen_data_2 = self.screen.screen_ndarray()[:, :, 0:1]
+        window_data = (self.get_fixed_window_2(mmap, r, c, (144, 160, 1))).astype(np.uint8) # astype(np.uint8)
 
-        # player is centered at 68, 72 in pixel units
-        # 68 -> player y, 72 -> player x
-        # guess we want to attempt to map the pixels to player units or vice versa
-        # Experimentally determined magic numbers below. Beware
-        visited_mask = np.zeros(VISITED_MASK_SHAPE, dtype=np.float32)
-        """
-        if self.taught_cut:
-            cut_mask = np.zeros_like(game_pixels_render)
-        else:
-            cut_mask = np.random.randint(0, 255, game_pixels_render.shape, dtype=np.uint8)
-        """
-        # If not in battle, set the visited mask. There's no reason to process it when in battle
-        if self.read_m(0xD057) == 0:
-            for y in range(-72 // 16, 72 // 16):
-                for x in range(-80 // 16, 80 // 16):
-                    # y-y1 = m (x-x1)
-                    # map [(0,0),(1,1)] -> [(0,.5),(1,1)] (cause we dont wnat it to be fully black)
-                    # y = 1/2 x + .5
-                    # current location tiles - player_y*8, player_x*8
-                    visited_mask[y, x, 0] = self.seen_coords.get(
-                        (
-                            player_x + x + 1,
-                            player_y + y + 1,
-                            map_n,
-                        ),
-                        0.15,
-                    )
+        # If window_data is (144, 160, 1), repeat its channels to match screen_data_2's shape (144, 160, 3)
+        # window_data_expanded = np.repeat(window_data, 3, axis=-1)
+        # Concatenate window_data and screen_data_2 along the channel axis
+        print(f'LINE317 \nwindow_data shape={np.shape(window_data)},\nscreen_data_2 shape={np.shape(screen_data_2)}\n')
 
-                    """
-                    visited_mask[
-                        16 * y + 76 : 16 * y + 16 + 76,
-                        16 * x + 80 : 16 * x + 16 + 80,
-                        :,
-                    ] = int(
-                        255
-                        * (
-                            self.seen_coords.get(
-                                (
-                                    player_x + x + 1,
-                                    player_y + y + 1,
-                                    map_n,
-                                ),
-                                0.15,
-                            )
-                        )
-                    )
-                    """
-                    """
-                    if self.taught_cut:
-                        cut_mask[
-                            16 * y + 76 : 16 * y + 16 + 76,
-                            16 * x + 80 : 16 * x + 16 + 80,
-                            :,
-                        ] = int(
-                            255
-                            * (
-                                self.cut_coords.get(
-                                    (
-                                        player_x + x + 1,
-                                        player_y + y + 1,
-                                        map_n,
-                                    ),
-                                    0,
-                                )
-                            )
-                        )
-                        """
-        """
-        gr, gc = local_to_global(player_y, player_x, map_n)
-        visited_mask = (
-            255
-            * np.repeat(
-                np.repeat(self.seen_global_coords[gr - 4 : gr + 5, gc - 4 : gc + 6], 16, 0), 16, -1
-            )
-        ).astype(np.uint8)
-        visited_mask = np.expand_dims(visited_mask, -1)
-        """
+        screen_window_combined = np.concatenate((screen_data_2, window_data, window_data * 0), axis=2)
+        # screen_window_combined = np.concatenate((screen_data_2, window_data), axis=2)
+        
+        # obs_size=3, window_data size=23040, counts_map_overlay_obs size=193584, screen_data_2 size=69120
+        # obs_shape=(3,), window_data shape=(144, 160, 1), counts_map_overlay_obs shape=(444, 436), screen_data_2 shape=(144, 160, 3)
+        print(f'screen_window_combined size&shape: {np.size(screen_window_combined)}\n{np.shape(screen_window_combined)}')
+        #         LINE317 
+        # window_data shape=(144, 160, 1),
+        # screen_data_2 shape=(144, 160, 1)
 
-        # game_pixels_render = np.concatenate([game_pixels_render, visited_mask, cut_mask], axis=-1)
-        # game_pixels_render = np.concatenate([game_pixels_render, visited_mask], axis=-1)
-
+        # screen_window_combined size&shape: 46080
+        # (144, 160, 2)
+        # Error generating overlay: operands could not be broadcast together with shapes (444,436,3) (444,436) 
         if reduce_res:
             # game_pixels_render = (
             #     downscale_local_mean(game_pixels_render, (2, 2, 1))
             # ).astype(np.uint8)
             game_pixels_render = game_pixels_render[::2, ::2, :]
         return {
-            "screen": game_pixels_render,
-            "masks": visited_mask,
+            "screen": screen_window_combined,
+            # "masks": visited_mask,
         }
 
     def _get_obs(self):
         screen = self.render()
-        """
-        screen = np.concatenate(
-            [
-                screen,
-                np.expand_dims(
-                    255 * resize(self.explore_map, screen.shape[:-1], anti_aliasing=False),
-                    axis=-1,
-                ).astype(np.uint8),
-            ],
-            axis=-1,
-        )
-        """
+        try:
+            # Use the adjusted overlay function to generate the overlay
+            overlay = self.make_pokemon_red_overlay_fast(bg, self.counts_map)     
+            # Assuming `overlay` now correctly matches the shape and type expected by your environment
+            # If `screen['screen']` is where the overlay should be applied, ensure compatibility
+            # For simplicity, let's say we're directly using `overlay` as part of the observation
+            self.counts_map_overlay_obs = overlay
+            print(f'LINE430 self.counts_map_overlay_obs size&shape: {np.size(self.counts_map_overlay_obs)}\n{np.shape(self.counts_map_overlay_obs)}')
+        except Exception as e:
+            print(f"Error generating overlay: {e}")
+            # Fallback or error handling
+        return {**screen, "global_map": np.expand_dims(self.counts_map_overlay_obs, axis=-1)}
 
-        self.update_recent_screens(screen)
-
-        return {**screen, "global_map": np.expand_dims(self.explore_map, axis=-1)}
+    # def _get_obs(self):
+    #     screen = self.render()
+    #     """
+    #     screen = np.concatenate(
+    #         [
+    #             screen,
+    #             np.expand_dims(
+    #                 255 * resize(self.explore_map, screen.shape[:-1], anti_aliasing=False),
+    #                 axis=-1,
+    #             ).astype(np.uint8),
+    #         ],
+    #         axis=-1,
+    #     )
+    #     """
+    #     try:
+    #         # Assuming counts_resized is your grayscale overlay with shape (444, 436)
+    #         # And bg is your background image with shape (444, 436, 3)
+    #         # Expand the overlay to have three channels
+    #         counts_resized_expanded = np.repeat(counts_resized[:, :, np.newaxis], 3, axis=2)
+    #         alpha = 0.8  # Adjust alpha to control the visibility of the overlay
+    #         overlay = ((1 - alpha) * bg + alpha * counts_resized_expanded).astype(np.uint8)
+    #         # Verify the shape
+    #         print(counts_resized_expanded.shape)  # Should be (444, 436, 3)
+    #         overlay_function = self.map_updater()
+    #         self.counts_map_overlay_obs = np.expand_dims(
+    #                 255 * resize(overlay_function(self.counts_map), screen.shape[:-1], anti_aliasing=False),
+    #                 axis=-1,).astype(np.uint8)
+    #         print(f'counts_map_overlay_obs shape&size: {np.size(self.counts_map_overlay_obs)}\n{np.shape(self.counts_map_overlay_obs)}')
+    #     except Exception as e:
+    #         print(f"Error generating overlay: {e}")
+    #         print(f'counts_map_overlay_obs shape&size: {np.size(self.counts_map_overlay_obs)}\n{np.shape(self.counts_map_overlay_obs)}')
+    #     return {**screen, "global_map": np.expand_dims(self.counts_map_overlay_obs, axis=-1)}
 
     def set_perfect_iv_dvs(self):
         party_size = self.read_m(PARTY_SIZE)
@@ -391,6 +487,8 @@ class RedGymEnv(Env):
 
         self.run_action_on_emulator(action)
         # self.update_recent_actions(action)
+        r, c, map_n = self.position()
+        self.update_heat_map(r, c, map_n)
         self.update_seen_coords()
         self.update_heal_reward()
         self.update_pokedex()
@@ -406,27 +504,9 @@ class RedGymEnv(Env):
 
         info = {}
         # TODO: Make log frequency a configuration parameter
-        if self.step_count % 20000 == 0:
+        if self.step_count % 2000 == 0: # 20000
             info = self.agent_stats(action)
-
         obs = self._get_obs()
-
-        # create a map of all event flags set, with names where possible
-        # if step_limit_reached:
-        """
-        if self.step_count % 100 == 0:
-            for address in range(event_flags_start, event_flags_end):
-                val = self.read_m(address)
-                for idx, bit in enumerate(f"{val:08b}"):
-                    if bit == "1":
-                        # TODO this currently seems to be broken!
-                        key = f"0x{address:X}-{idx}"
-                        if key in self.event_names.keys():
-                            self.current_event_flags_set[key] = self.event_names[key]
-                        else:
-                            print(f"could not find key: {key}")
-        """
-
         self.step_count += 1
 
         # return obs, new_reward, self.step_count > self.max_steps, False, info

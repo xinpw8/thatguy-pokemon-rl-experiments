@@ -172,7 +172,7 @@ if __name__ == "__main__":
         choices=["serial", "multiprocessing"],
         help="Vectorization method (serial, multiprocessing)",
     )
-    parser.add_argument("--wandb-entity", type=str, default="thatguy11325", help="WandB entity")
+    parser.add_argument("--wandb-entity", type=str, default="xinpw8", help="WandB entity")
     parser.add_argument("--wandb-project", type=str, default="pokemonred", help="WandB project")
     parser.add_argument("--wandb-group", type=str, default="pokemonred", help="WandB group")
     parser.add_argument("--track", action="store_true", help="Track on WandB")

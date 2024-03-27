@@ -3,8 +3,8 @@ train:
   torch_deterministic: True
   device: cuda
   total_timesteps: 100_000_000
-  learning_rate: 2.5e-4
-  num_envs: 64
+  learning_rate: 1.5e-4
+  num_envs: 96
   num_steps: 128
   anneal_lr: True
   gamma: 0.998
@@ -19,7 +19,7 @@ train:
   max_grad_norm: 0.5
   target_kl: ~
 
-  env_pool_batch_size: 24
+  env_pool_batch_size: 32
   envs_per_worker: 1
   envs_per_batch: ~
   env_pool: True
@@ -64,9 +64,9 @@ pokemon_red:
   package: pokemon_red
   train:
     total_timesteps: 100_000_000
-    num_envs: 128
-    envs_per_worker: 4
-    envs_per_batch: 48 
+    num_envs: 1 # 96
+    envs_per_worker: 1
+    envs_per_batch: 1 # 32 
     update_epochs: 3
     gamma: 0.998
     batch_size: 32768
