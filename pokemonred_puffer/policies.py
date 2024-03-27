@@ -2,17 +2,20 @@ import pufferlib.models
 import torch
 from torch import nn
 
+reduce_res = True
 
 class MultiConvolutionPolicy(pufferlib.models.Policy):
     def __init__(
         self,
         env,
-        screen_framestack: int = 1,
+        screen_framestack: int = 3,
         mask_framestack: int = 1,
-        global_map_frame_stack: int = 4, # 1
-        screen_flat_size: int = 46080,
+        global_map_frame_stack: int = 3, # 1
+        screen_flat_size: int = 64,
+        # screen_flat_size: int = 1920 if reduce_res == True else 14336,
         mask_flat_size: int = 128,
-        global_map_flat_size: int = 193584,
+        # global_map_flat_size: int = 1600,
+        global_map_flat_size: int = 64,
         input_size: int = 512,
         framestack: int = 1,
         flat_size: int = 1,
@@ -22,7 +25,7 @@ class MultiConvolutionPolicy(pufferlib.models.Policy):
         hidden_size=768,
         output_size=512,
         channels_last: bool = True,
-        downsample: int = 1,
+        downsample: int = 2,
     ):
         super().__init__(env)
         self.num_actions = self.action_space.n
@@ -105,7 +108,7 @@ class Recurrent(pufferlib.models.RecurrentWrapper):
 
 class Policy(pufferlib.models.Convolutional):
     def __init__(
-        self, env, input_size=512, hidden_size=512, output_size=512, framestack=3, flat_size=46080
+        self, env, input_size=512, hidden_size=512, output_size=512, framestack=3, flat_size=14336
     ):
         super().__init__(
             env=env,

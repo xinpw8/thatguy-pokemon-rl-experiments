@@ -2,11 +2,11 @@ train:
   seed: 1
   torch_deterministic: True
   device: cuda
-  total_timesteps: 100_000_000
-  learning_rate: 1.5e-4
-  num_envs: 96
+  # total_timesteps: 100_000_000_000
+  learning_rate: 1.65e-4 # previously 1.5e-4
+  # num_envs: 96
   num_steps: 128
-  anneal_lr: True
+  anneal_lr: False
   gamma: 0.998
   gae_lambda: 0.95
   num_minibatches: 4
@@ -20,7 +20,7 @@ train:
   target_kl: ~
 
   env_pool_batch_size: 32
-  envs_per_worker: 1
+  # envs_per_worker: 1
   envs_per_batch: ~
   env_pool: True
   verbose: True
@@ -28,11 +28,11 @@ train:
   checkpoint_interval: 200
   cpu_offload: True
   pool_kernel: [0]
-  batch_size: 32768
-  batch_rows: 128
+  # batch_size: 32768 # w/ 65536 it ooms
+  # batch_rows: 128
   bptt_horizon: 16 #8
   vf_clip_coef: 0.1
-  compile: True
+  # compile: True
   compile_mode: reduce-overhead
   
 sweep:
@@ -63,13 +63,13 @@ sweep:
 pokemon_red:
   package: pokemon_red
   train:
-    total_timesteps: 100_000_000
-    num_envs: 1 # 96
+    total_timesteps: 100_000_000_000
+    num_envs: 12 # 96 # 64 # 96
     envs_per_worker: 1
-    envs_per_batch: 1 # 32 
+    envs_per_batch: 4 # 32 
     update_epochs: 3
     gamma: 0.998
-    batch_size: 32768
+    batch_size: 16384 # 32768 # w/ 65536 it ooms
     batch_rows: 128
     compile: True
 

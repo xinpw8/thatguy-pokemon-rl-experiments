@@ -1,1 +1,1 @@
-python -m pokemonred_puffer.train --mode train --yaml config.yaml --track
+python -m pokemonred_puffer.train --vectorization multiprocessing --headless --no-render --track

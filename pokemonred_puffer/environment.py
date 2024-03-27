@@ -17,6 +17,9 @@ from pokemonred_puffer.global_map import GLOBAL_MAP_SHAPE, local_to_global
 import cv2
 from functools import partial
 from collections import defaultdict, deque
+import multiprocessing
+from multiprocessing import Manager
+import io, os
 
 EVENT_FLAGS_START = 0xD747
 EVENTS_FLAGS_LENGTH = 320
@@ -34,9 +37,25 @@ Y_POS_ADDR = 0xD361
 MAP_N_ADDR = 0xD35E
 CUT_GRASS_SEQ = deque([(0x52, 255, 1, 0, 1, 1), (0x52, 255, 1, 0, 1, 1), (0x52, 1, 1, 0, 1, 1)])
 CUT_FAIL_SEQ = deque([(-1, 255, 0, 0, 4, 1), (-1, 255, 0, 0, 1, 1), (-1, 255, 0, 0, 1, 1)])
-bg = cv2.imread('/puffertank/tg_networks/pokemonred_puffer/pokemonred_puffer/k_map_1_16th_scale.png')
+bg = cv2.imread('/bet_adsorption_xinpw8/betworks/thatguy-pokemon-rl-experiments/pokemonred_puffer/new_small_k_map.png')
 
-MAP_PATH = '/puffertank/tg_networks/pokemonred_puffer/pokemonred_puffer/map_data.json' # __file__.rstrip('game_map.py') + 'map_data.json'
+# import cv2
+
+# # Read the original image
+# bg_original = cv2.imread('/bet_adsorption_xinpw8/betworks/thatguy-pokemon-rl-experiments/pokemonred_puffer/k_map_1_16th_scale.png')
+
+# # Calculate new dimensions - let's say we want to downscale to half in each dimension for this example
+# height, width = bg_original.shape[:2]
+# new_dimensions = (width // 4, height // 4)  # Adjust these values as needed
+
+# # Resize the image
+# bg_resized = cv2.resize(bg_original, new_dimensions, interpolation=cv2.INTER_AREA)
+# # Save the resized image
+# resized_image_path = '/bet_adsorption_xinpw8/betworks/thatguy-pokemon-rl-experiments/pokemonred_puffer/new_small_k_map.png'  # Specify your desired path
+# cv2.imwrite(resized_image_path, bg_resized)
+
+
+MAP_PATH = '/bet_adsorption_xinpw8/betworks/thatguy-pokemon-rl-experiments/pokemonred_puffer/map_data.json' # __file__.rstrip('game_map.py') + 'map_data.json'
 MAP_DATA = json.load(open(MAP_PATH, 'r'))['regions']
 MAP_DATA = {int(e['id']): e for e in MAP_DATA}
 
@@ -54,7 +73,25 @@ def local_to_global(r, c, map_n):
 
 # TODO: Make global map usage a configuration parameter
 class RedGymEnv(Env):
+    # Shared counter among processes
+    counter_lock = multiprocessing.Lock()
+    counter = multiprocessing.Value('i', 0)
+    
+    # Initialize a shared integer with a lock for atomic updates
+    shared_length = multiprocessing.Value('i', 0)  # 'i' for integer
+    lock = multiprocessing.Lock()  # Lock to synchronize access
+    
+    # Initialize a Manager for shared BytesIO object
+    manager = Manager()
+    shared_bytes_io_data = manager.list([b''])  # Holds serialized BytesIO data
+
     def __init__(self, config=None):
+        # Increment counter atomically to get unique sequential identifier
+        with RedGymEnv.counter_lock:
+            env_id = RedGymEnv.counter.value
+            RedGymEnv.counter.value += 1
+        
+        self.env_id = env_id
         self.s_path = config["session_path"]
         self.save_final_state = config["save_final_state"]
         self.print_rewards = config["print_rewards"]
@@ -75,16 +112,21 @@ class RedGymEnv(Env):
         self.instance_id = (
             str(uuid.uuid4())[:8] if "instance_id" not in config else config["instance_id"]
         )
+        self.exp_path = Path(f'experiments/{str(self.instance_id)}')
+        # self.env_id = Path(f'session_{str(uuid.uuid4())[:8]}')
+        self.s_path = Path(f'{str(self.exp_path)}/sessions/{str(self.env_id)}') # .mkdir(parents=True, exist_ok=True)
         self.step_forgetting_factor = config["step_forgetting_factor"]
         self.forgetting_frequency = config["forgetting_frequency"]
         self.perfect_ivs = config["perfect_ivs"]
-        self.s_path.mkdir(exist_ok=True)
+        self.s_path.mkdir(parents=True, exist_ok=True)
         self.full_frame_writer = None
         self.model_frame_writer = None
         self.map_frame_writer = None
         self.reset_count = 0
         self.all_runs = []
         self.counts_map = np.zeros((444, 436), dtype=np.uint8)
+        self.last_map = -1
+        self.reduce_res = True
 
         self.essential_map_locations = {
             v: i for i, v in enumerate([40, 0, 12, 1, 13, 51, 2, 54, 14, 59, 60, 61, 15, 3, 65])
@@ -122,9 +164,10 @@ class RedGymEnv(Env):
         # self.screen_output_shape = (144, 160, self.frame_stacks)
         self.coords_pad = 12
 
-        self.counts_map_overlay_obs = np.zeros((444, 436))
+        # self.counts_map_overlay_obs = np.zeros((444, 436))
+        self.counts_map_overlay_obs = np.zeros((109, 111))
         self.counts_map_overlay_output_shape = self.counts_map_overlay_obs.shape
-        self.screen_window_combined = np.zeros((144, 160, 4))
+        self.screen_window_combined = np.zeros((72, 80, 4)) if self.reduce_res == True else np.zeros((144, 160, 4))
         self.screen_output_shape = self.screen_window_combined.shape
 
         # Set these in ALL subclasses
@@ -133,8 +176,11 @@ class RedGymEnv(Env):
         self.enc_freqs = 8
         
         self.observation_space = spaces.Dict({
-    "screen": spaces.Box(low=0, high=255, shape=(144, 160, 3), dtype=np.uint8),
-    "global_map": spaces.Box(low=0, high=255, shape=(444, 436, 3), dtype=np.uint8),
+    "screen": spaces.Box(low=0, high=255, shape=self.screen_output_shape, dtype=np.uint8),
+    "global_map": spaces.Box(low=0, high=255, shape=self.counts_map_overlay_output_shape, dtype=np.uint8),
+}) if self.reduce_res == True else spaces.Dict({
+    "screen": spaces.Box(low=0, high=255, shape=self.screen_output_shape, dtype=np.uint8), # (144, 160, 3)
+    "global_map": spaces.Box(low=0, high=255, shape=self.counts_map_overlay_output_shape, dtype=np.uint8),
 })
 
         # self.observation_space = spaces.Dict(
@@ -189,20 +235,46 @@ class RedGymEnv(Env):
         return r_pos, c_pos, map_n
 
     def make_pokemon_red_overlay_fast(self, bg, counts):
-        # Normalize counts to the range [0, 255] for grayscale
-        if counts.max() > 0:
-            counts_normalized = np.clip((counts / counts.max()) * 255, 0, 255).astype(np.uint8)
-        else:
-            counts_normalized = np.zeros_like(counts, dtype=np.uint8)
+        # Determine target dimensions
+        target_dimensions = (109, 111)  # Width x Height
 
-        # Expand the overlay to have three channels
-        counts_resized_expanded = np.repeat(counts_normalized[:, :, np.newaxis], 3, axis=2)
+        # Directly resize the counts map to the target size
+        counts_resized = cv2.resize(counts, target_dimensions, interpolation=cv2.INTER_AREA)
+
+        # Normalize, ensuring we don't divide by zero
+        max_count = counts_resized.max()
+        if max_count > 0:
+            counts_resized = np.clip((counts_resized / max_count) * 255, 0, 255).astype(np.uint8)
+        else:
+            counts_resized = np.zeros_like(counts_resized, dtype=np.uint8)
+
+        # Expand the overlay to three channels
+        counts_resized_expanded = np.stack([counts_resized]*3, axis=-1)
+
+        # Resize the background to match the overlay size
+        bg_resized = cv2.resize(bg.astype(float), target_dimensions, interpolation=cv2.INTER_AREA)
 
         # Apply the overlay with adjusted alpha
-        alpha = 0.8  # Adjust alpha to control the visibility of the overlay
-        overlay = ((1 - alpha) * bg.astype(float) + alpha * counts_resized_expanded.astype(float)).astype(np.uint8)
+        alpha = 0.8
+        overlay = ((1 - alpha) * bg_resized + alpha * counts_resized_expanded).astype(np.uint8)
 
         return overlay
+
+    # def make_pokemon_red_overlay_fast(self, bg, counts):
+    #     # Normalize counts to the range [0, 255] for grayscale
+    #     if counts.max() > 0:
+    #         counts_normalized = np.clip((counts / counts.max()) * 255, 0, 255).astype(np.uint8)
+    #     else:
+    #         counts_normalized = np.zeros_like(counts, dtype=np.uint8)
+
+    #     # Expand the overlay to have three channels
+    #     counts_resized_expanded = np.repeat(counts_normalized[:, :, np.newaxis], 3, axis=2)
+
+    #     # Apply the overlay with adjusted alpha
+    #     alpha = 0.8  # Adjust alpha to control the visibility of the overlay
+    #     overlay = ((1 - alpha) * bg.astype(float) + alpha * counts_resized_expanded.astype(float)).astype(np.uint8)
+
+    #     return overlay
 
 
     # def make_pokemon_red_overlay_fast(self, bg, counts):
@@ -244,7 +316,6 @@ class RedGymEnv(Env):
             ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)),
             mode="constant",
         )
-
 
     def update_heat_map(self, r, c, current_map):
         '''
@@ -355,25 +426,25 @@ class RedGymEnv(Env):
         self.cut_coords = {}
         self.cut_state = deque(maxlen=3)
 
-    def step_forget_explore(self):
-        self.seen_coords.update(
-            (k, max(0.15, v * self.step_forgetting_factor["coords"]))
-            for k, v in self.seen_coords.items()
-        )
-        # self.seen_global_coords *= self.step_forgetting_factor["coords"]
-        self.seen_map_ids *= self.step_forgetting_factor["map_ids"]
-        self.seen_npcs.update(
-            (k, max(0.15, v * self.step_forgetting_factor["npc"]))
-            for k, v in self.seen_npcs.items()
-        )
-        self.explore_map *= self.step_forgetting_factor["explore"]
-        self.explore_map[self.explore_map > 0] = np.clip(
-            self.explore_map[self.explore_map > 0], 0.15, 1
-        )
+    # def step_forget_explore(self):
+    #     self.seen_coords.update(
+    #         (k, max(0.15, v * self.step_forgetting_factor["coords"]))
+    #         for k, v in self.seen_coords.items()
+    #     )
+    #     # self.seen_global_coords *= self.step_forgetting_factor["coords"]
+    #     self.seen_map_ids *= self.step_forgetting_factor["map_ids"]
+    #     self.seen_npcs.update(
+    #         (k, max(0.15, v * self.step_forgetting_factor["npc"]))
+    #         for k, v in self.seen_npcs.items()
+    #     )
+    #     self.explore_map *= self.step_forgetting_factor["explore"]
+    #     self.explore_map[self.explore_map > 0] = np.clip(
+    #         self.explore_map[self.explore_map > 0], 0.15, 1
+    #     )
 
-    def render(self, reduce_res=False):
+    def render(self, reduce_res=True):
         # (144, 160, 3)
-        game_pixels_render = self.screen.screen_ndarray()[:, :, 0:1]
+        # game_pixels_render = self.screen.screen_ndarray()[:, :, 0:1]
         # # place an overlay on top of the screen greying out places we haven't visited
         # # first get our location
         # player_x, player_y, map_n = self.get_game_coords()
@@ -385,20 +456,20 @@ class RedGymEnv(Env):
         if 0 <= r <= 254 and 0 <= c <= 254:
             mmap[r, c] = 255
         # screen_data_2 = (self.screen.screen_ndarray()[:, :]).astype(np.uint8) # astype(np.uint8)
-        screen_data_2 = self.screen.screen_ndarray()[:, :, 0:1]
-        window_data = (self.get_fixed_window_2(mmap, r, c, (144, 160, 1))).astype(np.uint8) # astype(np.uint8)
+        screen_data_2 = self.screen.screen_ndarray()[::2, ::2, 0:1]
+        window_data = (self.get_fixed_window_2(mmap, r, c, (72, 80, 1))).astype(np.uint8) # astype(np.uint8)
 
         # If window_data is (144, 160, 1), repeat its channels to match screen_data_2's shape (144, 160, 3)
         # window_data_expanded = np.repeat(window_data, 3, axis=-1)
         # Concatenate window_data and screen_data_2 along the channel axis
-        print(f'LINE317 \nwindow_data shape={np.shape(window_data)},\nscreen_data_2 shape={np.shape(screen_data_2)}\n')
+        # print(f'LINE317 \nwindow_data shape={np.shape(window_data)},\nscreen_data_2 shape={np.shape(screen_data_2)}\n')
 
         screen_window_combined = np.concatenate((screen_data_2, window_data, window_data * 0), axis=2)
         # screen_window_combined = np.concatenate((screen_data_2, window_data), axis=2)
         
         # obs_size=3, window_data size=23040, counts_map_overlay_obs size=193584, screen_data_2 size=69120
         # obs_shape=(3,), window_data shape=(144, 160, 1), counts_map_overlay_obs shape=(444, 436), screen_data_2 shape=(144, 160, 3)
-        print(f'screen_window_combined size&shape: {np.size(screen_window_combined)}\n{np.shape(screen_window_combined)}')
+        # print(f'screen_window_combined size&shape: {np.size(screen_window_combined)}\n{np.shape(screen_window_combined)}')
         #         LINE317 
         # window_data shape=(144, 160, 1),
         # screen_data_2 shape=(144, 160, 1)
@@ -410,7 +481,8 @@ class RedGymEnv(Env):
             # game_pixels_render = (
             #     downscale_local_mean(game_pixels_render, (2, 2, 1))
             # ).astype(np.uint8)
-            game_pixels_render = game_pixels_render[::2, ::2, :]
+            # game_pixels_render = game_pixels_render[::2, ::2, :]
+            screen_window_combined = screen_window_combined[::2, ::2, :]
         return {
             "screen": screen_window_combined,
             # "masks": visited_mask,
@@ -420,12 +492,12 @@ class RedGymEnv(Env):
         screen = self.render()
         try:
             # Use the adjusted overlay function to generate the overlay
-            overlay = self.make_pokemon_red_overlay_fast(bg, self.counts_map)     
+            overlay = self.make_pokemon_red_overlay_fast(bg, self.counts_map)  
             # Assuming `overlay` now correctly matches the shape and type expected by your environment
             # If `screen['screen']` is where the overlay should be applied, ensure compatibility
             # For simplicity, let's say we're directly using `overlay` as part of the observation
             self.counts_map_overlay_obs = overlay
-            print(f'LINE430 self.counts_map_overlay_obs size&shape: {np.size(self.counts_map_overlay_obs)}\n{np.shape(self.counts_map_overlay_obs)}')
+            # print(f'LINE430 self.counts_map_overlay_obs size&shape: {np.size(self.counts_map_overlay_obs)}\n{np.shape(self.counts_map_overlay_obs)}')
         except Exception as e:
             print(f"Error generating overlay: {e}")
             # Fallback or error handling
@@ -482,8 +554,8 @@ class RedGymEnv(Env):
         if self.save_video and self.step_count == 0:
             self.start_video()
 
-        if self.step_count % self.forgetting_frequency == 0:
-            self.step_forget_explore()
+        # if self.step_count % self.forgetting_frequency == 0:
+        #     self.step_forget_explore()
 
         self.run_action_on_emulator(action)
         # self.update_recent_actions(action)
@@ -504,7 +576,7 @@ class RedGymEnv(Env):
 
         info = {}
         # TODO: Make log frequency a configuration parameter
-        if self.step_count % 2000 == 0: # 20000
+        if self.step_count % 20000 == 0: # 20000
             info = self.agent_stats(action)
         obs = self._get_obs()
         self.step_count += 1
@@ -653,7 +725,7 @@ class RedGymEnv(Env):
                 "x": x_pos,
                 "y": y_pos,
                 "map": map_n,
-                "map_location": self.get_map_location(map_n),
+                # "map_location": self.get_map_location(map_n),
                 "max_map_progress": self.max_map_progress,
                 "last_action": action,
                 "pcount": self.read_m(0xD163),
@@ -735,30 +807,30 @@ class RedGymEnv(Env):
         # self.seen_global_coords[local_to_global(y_pos, x_pos, map_n)] = 1
         self.seen_map_ids[map_n] = 1
 
-    def get_explore_map(self):
-        explore_map = np.zeros(GLOBAL_MAP_SHAPE)
-        for (x, y, map_n), v in self.seen_coords.items():
-            gy, gx = local_to_global(y, x, map_n)
-            if gy >= explore_map.shape[0] or gx >= explore_map.shape[1]:
-                print(f"coord out of bounds! global: ({gx}, {gy}) game: ({x}, {y}, {map_n})")
-            else:
-                explore_map[gy, gx] = v
+    # def get_explore_map(self):
+    #     explore_map = np.zeros(GLOBAL_MAP_SHAPE)
+    #     for (x, y, map_n), v in self.seen_coords.items():
+    #         gy, gx = local_to_global(y, x, map_n)
+    #         if gy >= explore_map.shape[0] or gx >= explore_map.shape[1]:
+    #             print(f"coord out of bounds! global: ({gx}, {gy}) game: ({x}, {y}, {map_n})")
+    #         else:
+    #             explore_map[gy, gx] = v
 
-        return explore_map
+    #     return explore_map
 
-    def update_recent_screens(self, cur_screen):
-        # self.recent_screens = np.roll(self.recent_screens, 1, axis=2)
-        # self.recent_screens[:, :, 0] = cur_screen[:, :, 0]
-        self.recent_screens.append(cur_screen)
-        if len(self.recent_screens) > self.frame_stacks:
-            self.recent_screens.popleft()
+    # def update_recent_screens(self, cur_screen):
+    #     # self.recent_screens = np.roll(self.recent_screens, 1, axis=2)
+    #     # self.recent_screens[:, :, 0] = cur_screen[:, :, 0]
+    #     self.recent_screens.append(cur_screen)
+    #     if len(self.recent_screens) > self.frame_stacks:
+    #         self.recent_screens.popleft()
 
-    def update_recent_actions(self, action):
-        # self.recent_actions = np.roll(self.recent_actions, 1)
-        # self.recent_actions[0] = action
-        self.recent_actions.append(action)
-        if len(self.recent_actions) > self.frame_stacks:
-            self.recent_actions.popleft()
+    # def update_recent_actions(self, action):
+    #     # self.recent_actions = np.roll(self.recent_actions, 1)
+    #     # self.recent_actions[0] = action
+    #     self.recent_actions.append(action)
+    #     if len(self.recent_actions) > self.frame_stacks:
+    #         self.recent_actions.popleft()
 
     def update_reward(self):
         # compute reward
@@ -920,109 +992,109 @@ class RedGymEnv(Env):
         else:
             return -1
 
-    def get_map_location(self, map_idx):
-        map_locations = {
-            0: {"name": "Pallet Town", "coordinates": np.array([70, 7])},
-            1: {"name": "Viridian City", "coordinates": np.array([60, 79])},
-            2: {"name": "Pewter City", "coordinates": np.array([60, 187])},
-            3: {"name": "Cerulean City", "coordinates": np.array([240, 205])},
-            62: {
-                "name": "Invaded house (Cerulean City)",
-                "coordinates": np.array([290, 227]),
-            },
-            63: {
-                "name": "trade house (Cerulean City)",
-                "coordinates": np.array([290, 212]),
-            },
-            64: {
-                "name": "Pokémon Center (Cerulean City)",
-                "coordinates": np.array([290, 197]),
-            },
-            65: {
-                "name": "Pokémon Gym (Cerulean City)",
-                "coordinates": np.array([290, 182]),
-            },
-            66: {
-                "name": "Bike Shop (Cerulean City)",
-                "coordinates": np.array([290, 167]),
-            },
-            67: {
-                "name": "Poké Mart (Cerulean City)",
-                "coordinates": np.array([290, 152]),
-            },
-            35: {"name": "Route 24", "coordinates": np.array([250, 235])},
-            36: {"name": "Route 25", "coordinates": np.array([270, 267])},
-            12: {"name": "Route 1", "coordinates": np.array([70, 43])},
-            13: {"name": "Route 2", "coordinates": np.array([70, 151])},
-            14: {"name": "Route 3", "coordinates": np.array([100, 179])},
-            15: {"name": "Route 4", "coordinates": np.array([150, 197])},
-            33: {"name": "Route 22", "coordinates": np.array([20, 71])},
-            37: {"name": "Red house first", "coordinates": np.array([61, 9])},
-            38: {"name": "Red house second", "coordinates": np.array([61, 0])},
-            39: {"name": "Blues house", "coordinates": np.array([91, 9])},
-            40: {"name": "oaks lab", "coordinates": np.array([91, 1])},
-            41: {
-                "name": "Pokémon Center (Viridian City)",
-                "coordinates": np.array([100, 54]),
-            },
-            42: {
-                "name": "Poké Mart (Viridian City)",
-                "coordinates": np.array([100, 62]),
-            },
-            43: {"name": "School (Viridian City)", "coordinates": np.array([100, 79])},
-            44: {"name": "House 1 (Viridian City)", "coordinates": np.array([100, 71])},
-            47: {
-                "name": "Gate (Viridian City/Pewter City) (Route 2)",
-                "coordinates": np.array([91, 143]),
-            },
-            49: {"name": "Gate (Route 2)", "coordinates": np.array([91, 115])},
-            50: {
-                "name": "Gate (Route 2/Viridian Forest) (Route 2)",
-                "coordinates": np.array([91, 115]),
-            },
-            51: {"name": "viridian forest", "coordinates": np.array([35, 144])},
-            52: {"name": "Pewter Museum (floor 1)", "coordinates": np.array([60, 196])},
-            53: {"name": "Pewter Museum (floor 2)", "coordinates": np.array([60, 205])},
-            54: {
-                "name": "Pokémon Gym (Pewter City)",
-                "coordinates": np.array([49, 176]),
-            },
-            55: {
-                "name": "House with disobedient Nidoran♂ (Pewter City)",
-                "coordinates": np.array([51, 184]),
-            },
-            56: {"name": "Poké Mart (Pewter City)", "coordinates": np.array([40, 170])},
-            57: {
-                "name": "House with two Trainers (Pewter City)",
-                "coordinates": np.array([51, 184]),
-            },
-            58: {
-                "name": "Pokémon Center (Pewter City)",
-                "coordinates": np.array([45, 161]),
-            },
-            59: {
-                "name": "Mt. Moon (Route 3 entrance)",
-                "coordinates": np.array([153, 234]),
-            },
-            60: {"name": "Mt. Moon Corridors", "coordinates": np.array([168, 253])},
-            61: {"name": "Mt. Moon Level 2", "coordinates": np.array([197, 253])},
-            68: {
-                "name": "Pokémon Center (Route 3)",
-                "coordinates": np.array([135, 197]),
-            },
-            193: {
-                "name": "Badges check gate (Route 22)",
-                "coordinates": np.array([0, 87]),
-            },  # TODO this coord is guessed, needs to be updated
-            230: {
-                "name": "Badge Man House (Cerulean City)",
-                "coordinates": np.array([290, 137]),
-            },
-        }
-        if map_idx in map_locations.keys():
-            return map_locations[map_idx]
-        else:
-            return {
-                "name": "Unknown",
-                "coordinates": np.array([80, 0]),
-            }  # TODO once all maps are added this case won't be needed
+    # def get_map_location(self, map_idx):
+    #     map_locations = {
+    #         0: {"name": "Pallet Town", "coordinates": np.array([70, 7])},
+    #         1: {"name": "Viridian City", "coordinates": np.array([60, 79])},
+    #         2: {"name": "Pewter City", "coordinates": np.array([60, 187])},
+    #         3: {"name": "Cerulean City", "coordinates": np.array([240, 205])},
+    #         62: {
+    #             "name": "Invaded house (Cerulean City)",
+    #             "coordinates": np.array([290, 227]),
+    #         },
+    #         63: {
+    #             "name": "trade house (Cerulean City)",
+    #             "coordinates": np.array([290, 212]),
+    #         },
+    #         64: {
+    #             "name": "Pokémon Center (Cerulean City)",
+    #             "coordinates": np.array([290, 197]),
+    #         },
+    #         65: {
+    #             "name": "Pokémon Gym (Cerulean City)",
+    #             "coordinates": np.array([290, 182]),
+    #         },
+    #         66: {
+    #             "name": "Bike Shop (Cerulean City)",
+    #             "coordinates": np.array([290, 167]),
+    #         },
+    #         67: {
+    #             "name": "Poké Mart (Cerulean City)",
+    #             "coordinates": np.array([290, 152]),
+    #         },
+    #         35: {"name": "Route 24", "coordinates": np.array([250, 235])},
+    #         36: {"name": "Route 25", "coordinates": np.array([270, 267])},
+    #         12: {"name": "Route 1", "coordinates": np.array([70, 43])},
+    #         13: {"name": "Route 2", "coordinates": np.array([70, 151])},
+    #         14: {"name": "Route 3", "coordinates": np.array([100, 179])},
+    #         15: {"name": "Route 4", "coordinates": np.array([150, 197])},
+    #         33: {"name": "Route 22", "coordinates": np.array([20, 71])},
+    #         37: {"name": "Red house first", "coordinates": np.array([61, 9])},
+    #         38: {"name": "Red house second", "coordinates": np.array([61, 0])},
+    #         39: {"name": "Blues house", "coordinates": np.array([91, 9])},
+    #         40: {"name": "oaks lab", "coordinates": np.array([91, 1])},
+    #         41: {
+    #             "name": "Pokémon Center (Viridian City)",
+    #             "coordinates": np.array([100, 54]),
+    #         },
+    #         42: {
+    #             "name": "Poké Mart (Viridian City)",
+    #             "coordinates": np.array([100, 62]),
+    #         },
+    #         43: {"name": "School (Viridian City)", "coordinates": np.array([100, 79])},
+    #         44: {"name": "House 1 (Viridian City)", "coordinates": np.array([100, 71])},
+    #         47: {
+    #             "name": "Gate (Viridian City/Pewter City) (Route 2)",
+    #             "coordinates": np.array([91, 143]),
+    #         },
+    #         49: {"name": "Gate (Route 2)", "coordinates": np.array([91, 115])},
+    #         50: {
+    #             "name": "Gate (Route 2/Viridian Forest) (Route 2)",
+    #             "coordinates": np.array([91, 115]),
+    #         },
+    #         51: {"name": "viridian forest", "coordinates": np.array([35, 144])},
+    #         52: {"name": "Pewter Museum (floor 1)", "coordinates": np.array([60, 196])},
+    #         53: {"name": "Pewter Museum (floor 2)", "coordinates": np.array([60, 205])},
+    #         54: {
+    #             "name": "Pokémon Gym (Pewter City)",
+    #             "coordinates": np.array([49, 176]),
+    #         },
+    #         55: {
+    #             "name": "House with disobedient Nidoran♂ (Pewter City)",
+    #             "coordinates": np.array([51, 184]),
+    #         },
+    #         56: {"name": "Poké Mart (Pewter City)", "coordinates": np.array([40, 170])},
+    #         57: {
+    #             "name": "House with two Trainers (Pewter City)",
+    #             "coordinates": np.array([51, 184]),
+    #         },
+    #         58: {
+    #             "name": "Pokémon Center (Pewter City)",
+    #             "coordinates": np.array([45, 161]),
+    #         },
+    #         59: {
+    #             "name": "Mt. Moon (Route 3 entrance)",
+    #             "coordinates": np.array([153, 234]),
+    #         },
+    #         60: {"name": "Mt. Moon Corridors", "coordinates": np.array([168, 253])},
+    #         61: {"name": "Mt. Moon Level 2", "coordinates": np.array([197, 253])},
+    #         68: {
+    #             "name": "Pokémon Center (Route 3)",
+    #             "coordinates": np.array([135, 197]),
+    #         },
+    #         193: {
+    #             "name": "Badges check gate (Route 22)",
+    #             "coordinates": np.array([0, 87]),
+    #         },  # TODO this coord is guessed, needs to be updated
+    #         230: {
+    #             "name": "Badge Man House (Cerulean City)",
+    #             "coordinates": np.array([290, 137]),
+    #         },
+    #     }
+    #     if map_idx in map_locations.keys():
+    #         return map_locations[map_idx]
+    #     else:
+    #         return {
+    #             "name": "Unknown",
+    #             "coordinates": np.array([80, 0]),
+    #         }  # TODO once all maps are added this case won't be needed

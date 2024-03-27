@@ -555,7 +555,7 @@ class CleanPuffeRL:
         # Optimizing the policy and value network
         train_time = time.time()
         pg_losses, entropy_losses, v_losses, clipfracs, old_kls, kls = [], [], [], [], [], []
-        mb_obs_buffer = torch.zeros_like(b_obs[0], pin_memory=(self.device == "cuda"))
+        mb_obs_buffer = torch.zeros_like(b_obs[0]).to(self.device, non_blocking=True) #, pin_memory=(self.device == "cuda"))
 
         for epoch in range(config.update_epochs):
             lstm_state = None
